@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /c/Users/rozba/Downloads /c/Users/rozba/Desktop /c/Users/rozba/Documents -name *.xlsx)",
+      "Bash(find /c/Users/rozba/Downloads /c/Users/rozba/Desktop /c/Users/rozba/Documents /c/Users/rozba/OneDrive -name *VS* -o -name *Vessel* -o -name *vessel* -o -name *schedule* -o -name *Schedule*)",
+      "Bash(npx tsc:*)",
+      "Bash(node -e \":*)",
+      "Bash(npx supabase:*)",
+      "Bash(PGPASSWORD=postgres psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -c \"ALTER TABLE cargo_plans ADD COLUMN IF NOT EXISTS source_origin text, ADD COLUMN IF NOT EXISTS owner_operator text;\")"
+    ]
+  }
+}
