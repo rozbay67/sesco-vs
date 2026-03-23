@@ -23,7 +23,7 @@ export default function DashboardPage() {
       const { data: roleData } = await supabase
         .from('user_roles')
         .select('role')
-        .eq('is_archived', false)
+        .neq('is_archived', true)
 
       if (roleData) setRoles(roleData.map((r: any) => r.role))
       setLoading(false)
@@ -84,8 +84,11 @@ export default function DashboardPage() {
           <h2 className="text-lg font-semibold mb-4">Modüller</h2>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             {[
-              { label: 'Berth Schedule', href: '/dashboard/berth-schedule' },
               { label: 'Cargo Plans', href: '/dashboard/cargo-plans' },
+              { label: 'Cargo Nomination', href: '/dashboard/cargo-nomination' },
+              { label: 'Vessel Planning', href: '/dashboard/vessel-planning' },
+              { label: 'Vessel Schedule', href: '/dashboard/vessel-schedule' },
+              { label: 'Berth Schedule', href: '/dashboard/berth-schedule' },
               { label: 'Voyages', href: '/dashboard/voyages' },
               { label: 'Payment Orders', href: '/dashboard/payment-orders' },
             ].map(item => (

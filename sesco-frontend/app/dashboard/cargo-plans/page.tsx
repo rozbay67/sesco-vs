@@ -4,9 +4,11 @@ import { useEffect, useState, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase'
 
+type DocCount = { total: number; pending: number }
+
 const CARGO_STATUSES = [
-  'PLANNED', 'OPEN_FOR_FIXTURE', 'VESSEL_NOMINATED', 'LAYCAN_NOMINATED',
-  'FIXTURED', 'LOADING', 'SAILED', 'DISCHARGING', 'COMPLETED', 'CANCELLED',
+  'PLANNED', 'CONFIRMED_FOR_FIXTURE', 'LAYCAN_NOMINATED', 'VESSEL_NOMINATED',
+  'VESSEL_ACCEPTED', 'LOADED', 'DISCHARGED', 'COMPLETED', 'CANCELLED',
 ]
 
 const CARGO_COLS = [
@@ -23,16 +25,23 @@ const CARGO_COLS = [
 ]
 
 const STATUS_COLOR: Record<string, string> = {
-  PLANNED:           'bg-gray-600 text-gray-100',
-  OPEN_FOR_FIXTURE:  'bg-blue-700 text-blue-100',
-  VESSEL_NOMINATED:  'bg-yellow-600 text-yellow-100',
-  LAYCAN_NOMINATED:  'bg-yellow-500 text-yellow-900',
-  FIXTURED:          'bg-green-700 text-green-100',
-  LOADING:           'bg-orange-500 text-orange-100',
-  SAILED:            'bg-purple-600 text-purple-100',
-  DISCHARGING:       'bg-orange-400 text-orange-900',
-  COMPLETED:         'bg-green-800 text-green-100',
-  CANCELLED:         'bg-red-700 text-red-100',
+  PLANNED:                'bg-gray-600 text-gray-100',
+  CONFIRMED_FOR_FIXTURE:  'bg-blue-700 text-blue-100',
+  LAYCAN_NOMINATED:       'bg-yellow-500 text-yellow-900',
+  LAYCAN_REVISED:         'bg-yellow-600 text-yellow-100',
+  VESSEL_NOMINATED:       'bg-orange-500 text-orange-100',
+  VESSEL_ACCEPTED:        'bg-green-700 text-green-100',
+  VESSEL_REJECTED:        'bg-red-600 text-red-100',
+  LOADED:                 'bg-purple-600 text-purple-100',
+  DISCHARGED:             'bg-indigo-500 text-indigo-100',
+  COMPLETED:              'bg-green-800 text-green-100',
+  CANCELLED:              'bg-red-700 text-red-100',
+  // backward compat
+  OPEN_FOR_FIXTURE:       'bg-blue-700 text-blue-100',
+  FIXTURED:               'bg-green-700 text-green-100',
+  LOADING:                'bg-orange-500 text-orange-100',
+  SAILED:                 'bg-purple-600 text-purple-100',
+  DISCHARGING:            'bg-orange-400 text-orange-900',
 }
 
 type CargoItem = { quantity_mt: number; cargo_types: { cargo_name: string } | null }
@@ -100,26 +109,64 @@ function planToForm(p: CargoPlan): EditForm {
 
 export default function CargoPlansPage() {
   const [plans, setPlans] = useState<CargoPlan[]>([])
+  const [docCounts, setDocCounts] = useState<Record<string, DocCount>>({})
   const [loading, setLoading] = useState(true)
   const [editId, setEditId] = useState<string | null>(null)   // null = new plan
   const [panelOpen, setPanelOpen] = useState(false)
   const [form, setForm] = useState<EditForm>(blankForm())
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
-  const panelRef = useRef<HTMLDivElement>(null)
+  const panelRef  = useRef<HTMLDivElement>(null)
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const router = useRouter()
+  // Delete modal
+  const [showDeleteModal, setShowDeleteModal] = useState(false)
+  const [deletePassword,  setDeletePassword]  = useState('')
+  const [deleteError,     setDeleteError]     = useState('')
+  const [deleting,        setDeleting]        = useState(false)
 
-  useEffect(() => { loadPlans() }, [])
+  useEffect(() => {
+    loadPlans()
+    const supabase = createClient()
+    const debouncedLoad = () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current)
+      debounceRef.current = setTimeout(loadPlans, 600)
+    }
+    const sub = supabase
+      .channel('cargo_plans_list')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'cargo_plans' }, debouncedLoad)
+      .subscribe()
+    const onVisible = () => { if (!document.hidden) loadPlans() }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current)
+      supabase.removeChannel(sub)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [])
 
   async function loadPlans() {
     const supabase = createClient()
-    const { data, error } = await supabase
-      .from('cargo_plans')
-      .select('id,cargo_ref,planning_stage,status,shipper,consignee,charterer,owner_operator,source_origin,quantity_mt,load_port,discharge_port,laycan_start,laycan_end,discharge_eta,vessel_name,notes,created_at,cargo_plan_items(quantity_mt,cargo_types(cargo_name))')
-      .eq('is_archived', false)
-      .order('laycan_start', { ascending: true })
-    if (error) { setError(error.message); setLoading(false); return }
-    setPlans((data || []) as unknown as CargoPlan[])
+    const [planRes, docRes] = await Promise.all([
+      supabase
+        .from('cargo_plans')
+        .select('id,cargo_ref,planning_stage,status,shipper,consignee,charterer,owner_operator,source_origin,quantity_mt,load_port,discharge_port,laycan_start,laycan_end,discharge_eta,vessel_name,notes,created_at,cargo_plan_items(quantity_mt,cargo_types(cargo_name))')
+        .neq('is_archived', true)
+        .order('laycan_start', { ascending: true }),
+      supabase
+        .from('voyage_documents')
+        .select('cargo_plan_id,status'),
+    ])
+    if (planRes.error) { setError(planRes.error.message); setLoading(false); return }
+    setPlans((planRes.data || []) as unknown as CargoPlan[])
+
+    const counts: Record<string, DocCount> = {}
+    for (const d of docRes.data || []) {
+      if (!counts[d.cargo_plan_id]) counts[d.cargo_plan_id] = { total: 0, pending: 0 }
+      counts[d.cargo_plan_id].total++
+      if (d.status === 'PENDING') counts[d.cargo_plan_id].pending++
+    }
+    setDocCounts(counts)
     setLoading(false)
   }
 
@@ -190,7 +237,30 @@ export default function CargoPlansPage() {
       }
     }
 
-    setPanelOpen(false); setSaving(false); loadPlans()
+    setPanelOpen(false); setSaving(false); loadPlans(); router.refresh()
+  }
+
+  async function handleDeletePlan() {
+    if (!editId) return
+    setDeleting(true); setDeleteError('')
+    const supabase = createClient()
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user?.email) { setDeleteError('Not authenticated'); setDeleting(false); return }
+
+    const { error: authErr } = await supabase.auth.signInWithPassword({ email: user.email, password: deletePassword })
+    if (authErr) { setDeleteError('Wrong password'); setDeleting(false); return }
+
+    const { data: rec } = await supabase.from('cargo_plans').select('*').eq('id', editId).single()
+    await supabase.from('cargo_plans').update({ is_archived: true }).eq('id', editId)
+    await supabase.from('audit_logs').insert({
+      table_name: 'cargo_plans', record_id: editId, action_type: 'ARCHIVE',
+      user_id: user.id, old_value: rec || {}, new_value: { is_archived: true },
+      application_context: { action: 'delete', performed_via: 'cargo-plans' },
+    })
+
+    setPlans(ps => ps.filter(p => p.id !== editId))
+    setShowDeleteModal(false); setPanelOpen(false)
+    setDeletePassword(''); setDeleting(false)
   }
 
   // Quick status change without opening panel
@@ -198,6 +268,9 @@ export default function CargoPlansPage() {
     const supabase = createClient()
     await supabase.from('cargo_plans').update({ status: newStatus }).eq('id', planId)
     setPlans(ps => ps.map(p => p.id === planId ? { ...p, status: newStatus } : p))
+    if (newStatus === 'CONFIRMED_FOR_FIXTURE') {
+      router.push('/dashboard/cargo-nomination')
+    }
   }
 
   return (
@@ -302,6 +375,43 @@ export default function CargoPlansPage() {
               className="px-4 py-1.5 bg-gray-700 hover:bg-gray-600 rounded text-xs">
               Cancel
             </button>
+            {editId && (
+              <button onClick={() => { setDeletePassword(''); setDeleteError(''); setShowDeleteModal(true) }}
+                className="ml-auto px-4 py-1.5 bg-red-900 hover:bg-red-800 text-red-200 rounded text-xs">
+                Delete
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {showDeleteModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="bg-gray-900 border border-red-900 rounded-xl w-full max-w-sm p-6 shadow-2xl">
+            <h2 className="font-bold text-red-300 mb-1">Archive Record</h2>
+            <p className="text-gray-400 text-xs mb-4">
+              This will archive <span className="text-white">{form.cargo_ref}</span>.
+              Enter your password to confirm.
+            </p>
+            <input
+              type="password"
+              value={deletePassword}
+              onChange={e => setDeletePassword(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && handleDeletePlan()}
+              placeholder="Your password"
+              autoFocus
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-sm focus:outline-none focus:border-red-500 mb-3"
+            />
+            {deleteError && <p className="text-red-400 text-xs mb-3">{deleteError}</p>}
+            <div className="flex gap-2">
+              <button onClick={handleDeletePlan} disabled={deleting || !deletePassword}
+                className="px-4 py-2 bg-red-700 hover:bg-red-600 disabled:opacity-50 rounded text-sm font-semibold">
+                {deleting ? 'Archiving…' : 'Archive'}
+              </button>
+              <button onClick={() => setShowDeleteModal(false)}
+                className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm">Cancel</button>
+            </div>
           </div>
         </div>
       )}
@@ -371,7 +481,21 @@ export default function CargoPlansPage() {
                   return (
                     <tr key={p.id}
                       className={`border-b border-gray-800 ${isEditing ? 'bg-blue-900/20' : 'hover:bg-gray-800/40'}`}>
-                      <td className="px-2 py-1.5 border border-gray-800 font-mono text-blue-400">{p.cargo_ref}</td>
+                      <td className="px-2 py-1.5 border border-gray-800">
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            onClick={() => router.push(`/dashboard/cargo-plans/${p.id}`)}
+                            className="font-mono text-blue-400 hover:text-blue-300 hover:underline text-xs"
+                          >
+                            {p.cargo_ref}
+                          </button>
+                          {docCounts[p.id]?.total > 0 && (
+                            docCounts[p.id].pending > 0
+                              ? <span className="px-1 py-0.5 rounded text-[9px] font-medium bg-yellow-700 text-yellow-100">{docCounts[p.id].pending}⏳</span>
+                              : <span className="px-1 py-0.5 rounded text-[9px] font-medium bg-green-800 text-green-200">✓</span>
+                          )}
+                        </div>
+                      </td>
                       <td className="px-2 py-1.5 border border-gray-800 text-gray-200">{p.vessel_name || 'TBN'}</td>
                       <td className="px-2 py-1.5 border border-gray-800 text-gray-300">{p.source_origin || p.load_port || '—'}</td>
                       <td className="px-2 py-1.5 border border-gray-800 text-yellow-400">{getQuarter(p.notes)}</td>
